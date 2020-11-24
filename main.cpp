@@ -24,12 +24,12 @@ struct SdfTocId
 struct SdfDdsHeader
 {
     uint32_t usedBytes;
-    uint8_t bytes[0x94];
+    uint8_t bytes[200];
 };
 
 #pragma pack(pop)
 
-
+static const size_t CHUNK_SIZE = 0x10000;
 
 struct FileTree
 {
@@ -64,19 +64,24 @@ struct FileTree
 
             ch = ch - 'A';
             auto count1 = ch & 7;
-            auto flag1 = (ch >> 3) & 1;
+            //auto flag1 = (ch >> 3) & 1;
 
             if (count1)
             {
                 uint32_t strangeId = data.Read<uint32_t>();
                 auto ch2 = data.Read<uint8_t>();
                 auto byteCount = ch2 & 3;
-                auto byteValue = ch2 >> 2;
+                //auto byteValue = ch2 >> 2;
                 uint64_t ddsType = readVariadicInteger(byteCount);
 
                 for (int chunkIndex = 0;chunkIndex<count1;chunkIndex++)
                 {
                     auto ch3 = data.Read<uint8_t>();
+                    if (ch3 == 0)
+                    {
+                        break;
+                    }
+
                     auto compressedSizeByteCount = (ch3 & 3) + 1;
                     auto packageOffsetByteCount = (ch3 >> 2) & 7;
                     auto hasCompression = (ch3 >> 5) & 1;
@@ -98,7 +103,8 @@ struct FileTree
 
                     if (hasCompression)
                     {
-                        uint64_t pageCount = (decompressedSize + 0xffff) >> 16;
+                        //uint64_t pageCount = (decompressedSize + 0xffff) >> 16;
+                        uint64_t pageCount = (decompressedSize + CHUNK_SIZE - 1) / CHUNK_SIZE;
                         if (pageCount > 1)
                         {
                             for (uint64_t page = 0; page < pageCount; page++)
@@ -119,7 +125,8 @@ struct FileTree
                 }
 
             }
-            if (flag1)
+
+            if (ch & 8) //if (flag1)
             {
                 auto ch3 = data.Read<uint8_t>();
                 while (ch3--)
@@ -172,6 +179,13 @@ int wmain(int argc, wchar_t* argv[])
         auto block1 = file.Array<uint32_t>(header.block1count);
         auto block11 = file.Array<SdfTocId>(header.block1count);
         auto ddsHeaderBlock = file.Array<SdfDdsHeader>(header.ddsHeaderBlockCount);
+        // display all dds header info:
+        std::cout << "\nFound all dds header infos:\n";
+        for (size_t ddsIdx = 0; ddsIdx < ddsHeaderBlock.Size(); ++ddsIdx)
+        {
+            const SdfDdsHeader& DDSHeader = ddsHeaderBlock[ddsIdx];
+            std::cout << "[" << ddsIdx << "] Header Size = " << DDSHeader.usedBytes << std::endl;
+        }
 
         // find the compressed bulk data
         size_t CompressDataOffset = file.Size() - 0x30 - header.compressedSize;
@@ -222,43 +236,46 @@ int wmain(int argc, wchar_t* argv[])
                 std::unique_ptr<uint8_t[]> decompressed = std::make_unique<uint8_t[]>(decompressedSize);
                 uint64_t decompOffset = 0;
                 uint64_t compOffset = 0;
+                uint64_t MySize = decompressedSize;
                 for (uint64_t compSizePart : compSizeArray)
                 {
-                    const uint64_t pageSize = 0x10000ull;
-                    size_t decompSizePart = std::min(decompressedSize - decompOffset, pageSize);
-
-                    if (compSizePart == 0 || decompSizePart == compSizePart)
+                    size_t chunkSize = CHUNK_SIZE;
+                    if (MySize < chunkSize)
                     {
-                        fileBlock->Get<uint8_t>(decompressed.get() + decompOffset, packageOffset + compOffset, decompSizePart);
-                        compSizePart = decompSizePart;
+                        chunkSize = MySize;
                     }
-                    else
-                    {
-                        auto compressed = fileBlock->Get<uint8_t>(packageOffset + compOffset, compSizePart);
-                        //if (uncompress(decompressed.get() + decompOffset, &decompSizePart, compressed.get(), compSizePart) != Z_OK)
-                        //    throw std::exception("Uncompress error");
-                        size_t dSize = ZSTD_decompress(decompressed.get() + decompOffset, decompSizePart, compressed.get(), compSizePart);
-                        if (dSize != decompSizePart)
-                        {
-                            throw std::exception("Uncompress error");
-                        }
-                    }
-                    decompOffset += decompSizePart;
-                    compOffset += compSizePart;
 
+					if (compSizePart == 0 || compSizePart >= chunkSize)
+					{
+						fileBlock->Get<uint8_t>(decompressed.get() + decompOffset, packageOffset, chunkSize);
+                        packageOffset += chunkSize;
+                        decompOffset += chunkSize;
+					}
+					else
+					{
+						auto compressed = fileBlock->Get<uint8_t>(packageOffset, compSizePart);
+						size_t dSize = ZSTD_decompress(decompressed.get() + decompOffset, chunkSize, compressed.get(), compSizePart);
+						if (dSize != chunkSize)
+						{
+							throw std::exception("Uncompress error");
+						}
+                        packageOffset += compSizePart;
+                        decompOffset += chunkSize;
+					}
+                    MySize -= chunkSize;
                 }
                 resultBlock = MakeBlockMemory(std::move(decompressed), decompressedSize);
             }
 
             if (useDDS)
             {
-                SdfDdsHeader ddsHeader = ddsHeaderBlock[ddsType];
-                const int ddsHeaderDataSize = ddsHeader.usedBytes;
-                auto fullDataBlockSize = ddsHeaderDataSize + resultBlock->Size();
-                auto fullDataBlock = std::make_unique<uint8_t[]>(fullDataBlockSize);
-                std::memcpy(fullDataBlock.get(), ddsHeader.bytes, ddsHeaderDataSize);
-                resultBlock->Get(fullDataBlock.get() + ddsHeaderDataSize, 0, resultBlock->Size());
-                resultBlock = MakeBlockMemory(std::move(fullDataBlock), fullDataBlockSize);
+				SdfDdsHeader ddsHeader = ddsHeaderBlock[ddsType];
+				const int ddsHeaderDataSize = ddsHeader.usedBytes;
+				auto fullDataBlockSize = ddsHeaderDataSize + resultBlock->Size();
+				auto fullDataBlock = std::make_unique<uint8_t[]>(fullDataBlockSize);
+				std::memcpy(fullDataBlock.get(), ddsHeader.bytes, ddsHeaderDataSize);
+				resultBlock->Get(fullDataBlock.get() + ddsHeaderDataSize, 0, resultBlock->Size());
+				resultBlock = MakeBlockMemory(std::move(fullDataBlock), fullDataBlockSize);
             }
 
             if (append)
