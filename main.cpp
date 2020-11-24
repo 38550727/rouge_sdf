@@ -1,6 +1,6 @@
 #include "BasicFile.hpp"
 #include "utils.h"
-#include <zlib.h>
+#include <zstd.h>
 #include <boost\filesystem.hpp>
 #include <boost\format.hpp>
 
@@ -17,9 +17,9 @@ struct SdfTocHeader
 };
 struct SdfTocId
 {
-    uint64_t ubisoft;
-    uint8_t data[0x20];
     uint64_t massive;
+    uint8_t data[0x20];
+    uint64_t ubisoft;
 };
 struct SdfDdsHeader
 {
@@ -47,6 +47,7 @@ struct FileTree
             }
             return result;
         };
+
         auto ch = data.Read<char>();
         if (ch == 0)
             throw std::exception("Unexcepted byte in file tree");
@@ -144,10 +145,11 @@ int wmain(int argc, wchar_t* argv[])
 {
     if (argc != 3)
     {
-        std::cout << "Tom Clancy's The Division .sdftoc extractor v2" << std::endl;
+        std::cout << "Mario + Rabbids Kingdom Battle .sdftoc extractor" << std::endl;
         std::cout << "usage: rouge_sdf.exe <.sdftoc path> <output directory>" << std::endl;
         return 0;
     }
+
     try
     {
 
@@ -167,40 +169,28 @@ int wmain(int argc, wchar_t* argv[])
             file.Seek(0x140, FileOriginCurrent);
         }
 
-        auto block1 = file.Array<uint32_t>(header.block1count);;
-        auto block11 = file.Array<SdfTocId>(header.block1count);;
+        auto block1 = file.Array<uint32_t>(header.block1count);
+        auto block11 = file.Array<SdfTocId>(header.block1count);
         auto ddsHeaderBlock = file.Array<SdfDdsHeader>(header.ddsHeaderBlockCount);
 
-
+        // find the compressed bulk data
+        size_t CompressDataOffset = file.Size() - 0x30 - header.compressedSize;
+        file.Seek(CompressDataOffset, FileOriginBegin);
         std::unique_ptr<uint8_t[]> decompressed = std::make_unique<uint8_t[]>(header.decompressedSize);
         std::unique_ptr<uint8_t[]> compressed = std::make_unique<uint8_t[]>(header.compressedSize);
 
         file.Read<uint8_t>(compressed.get(), header.compressedSize);
-        uLong decompSize = header.decompressedSize;
-        uncompress(decompressed.get(), &decompSize, compressed.get(), header.compressedSize);
+        // use zstd method
+        size_t decompSize = ZSTD_decompress(decompressed.get(), header.decompressedSize, compressed.get(), header.compressedSize);
         File f = File(MakeBlockMemory(std::move(decompressed), decompSize));
         FileTree::ParseNames(f, [&](const std::string &name, uint64_t packageId, uint64_t packageOffset,
             uint64_t decompressedSize, const std::vector<uint64_t> & compSizeArray,
             uint64_t ddsType, bool append, bool useDDS)
         {
-
-
             std::cout << name << std::endl;
 
             boost::filesystem::path sdfTocPath(sdfTocFile);
-            std::wstring layer;
-            if (packageId < 1000)
-            {
-                layer = L"A";
-            }
-            else if (packageId < 2000)
-            {
-                layer = L"B";
-            }
-            else
-            {
-                layer = L"C";
-            }
+            std::wstring layer = L"A" + (packageId / 1000);
             typedef  boost::basic_format<wchar_t >  wformat;
             std::wstring dataFormated = boost::str(boost::wformat(L"-%s-%04i.sdfdata") % layer % packageId);
             std::wstring sdfDataPath = sdfTocPath.parent_path().append(sdfTocPath.stem().wstring()).wstring() + dataFormated;
@@ -209,6 +199,11 @@ int wmain(int argc, wchar_t* argv[])
                 return;
 
             BlockPtr fileBlock = MakeBlockDisk(sdfDataPath);
+            if (fileBlock->Size() <= 5)
+            {
+                // Skip 'Dummy' file
+                return;
+            }
 
             std::wstring outFileName = outputDir + AnsiToUnicode(name);
             std::replace(outFileName.begin(), outFileName.end(), L'/', L'\\');
@@ -230,7 +225,7 @@ int wmain(int argc, wchar_t* argv[])
                 for (uint64_t compSizePart : compSizeArray)
                 {
                     const uint64_t pageSize = 0x10000ull;
-                    uLong decompSizePart = std::min(decompressedSize - decompOffset, pageSize);
+                    size_t decompSizePart = std::min(decompressedSize - decompOffset, pageSize);
 
                     if (compSizePart == 0 || decompSizePart == compSizePart)
                     {
@@ -240,9 +235,13 @@ int wmain(int argc, wchar_t* argv[])
                     else
                     {
                         auto compressed = fileBlock->Get<uint8_t>(packageOffset + compOffset, compSizePart);
-                        if (uncompress(decompressed.get() + decompOffset, &decompSizePart, compressed.get(), compSizePart) != Z_OK)
+                        //if (uncompress(decompressed.get() + decompOffset, &decompSizePart, compressed.get(), compSizePart) != Z_OK)
+                        //    throw std::exception("Uncompress error");
+                        size_t dSize = ZSTD_decompress(decompressed.get() + decompOffset, decompSizePart, compressed.get(), compSizePart);
+                        if (dSize != decompSizePart)
+                        {
                             throw std::exception("Uncompress error");
-
+                        }
                     }
                     decompOffset += decompSizePart;
                     compOffset += compSizePart;
