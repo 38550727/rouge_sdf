@@ -31,55 +31,54 @@ struct SdfDdsHeader
 #pragma pack(pop)
 
 static const size_t CHUNK_SIZE = 0x10000;
+void DumpFile(File& data, const std::string& name, 
+	uint16_t packageId, uint64_t packageOffset,
+	bool hasCompression, uint64_t decompressedSize, uint64_t compressedSize,
+	uint64_t ddsType, bool append, bool useDDS);
+
+uint64_t readVariadicInteger(File& data, uint32_t count)
+{
+	uint64_t result = 0;
+
+	for (uint32_t i = 0; i < count; i++)
+	{
+		result |= uint64_t(data.Read<uint8_t>()) << (i * 8);
+	}
+	return result;
+};
 
 struct FileTree
 {
-    template <typename Callback>
-    static void ParseNames(File data, const Callback &cbFunction, std::string name="")
+    static void ParseNames(File& memoryFile, std::string name="")
     {
-
-        auto readVariadicInteger = [&data](uint32_t count)
-        {
-            uint64_t result = 0;
-
-            for (uint32_t i = 0; i < count; i++)
-            {
-                result |= uint64_t(data.Read<uint8_t>()) << (i * 8);
-            }
-            return result;
-        };
-
-        auto ch = data.Read<char>();
+        auto ch = memoryFile.Read<char>();
         if (ch == 0)
         {
             std::cout << "Error: Unexcepted byte in file tree!\n";
             return;
         }
-
-        if (ch >= 1 && ch <= 0x1f) //string part
+        else if (ch >= 1 && ch <= 0x1f) //string part
         {
             while (ch--)
             {
-                name += data.Read<char>();
+                name += memoryFile.Read<char>();
             }
-            ParseNames(data, cbFunction, name);
+            ParseNames(memoryFile, name);
         }
         else if (ch >= 'A' && ch <= 'Z') //file entry
         {
             ch = ch - 'A';
             char count1 = ch & 7;
-            //auto flag1 = (ch >> 3) & 1;
-
-            if (count1)
+            if (count1 != 0)
             {
-                uint32_t strangeId = data.Read<uint32_t>();
-                uint8_t ch2 = data.Read<uint8_t>();
-                auto byteCount = ch2 & 3;
-                uint64_t ddsType = readVariadicInteger(byteCount);
+                uint32_t strangeId = memoryFile.Read<uint32_t>();
+                uint8_t ch2 = memoryFile.Read<uint8_t>();
+                ch2 &= 3;
+                uint64_t ddsType = readVariadicInteger(memoryFile, ch2);
 
                 for (int chunkIndex = 0; chunkIndex < count1; chunkIndex++)
                 {
-                    auto ch3 = data.Read<uint8_t>();
+                    auto ch3 = memoryFile.Read<uint8_t>();
                     if (ch3 == 0)
                     {
                         break;
@@ -89,67 +88,47 @@ struct FileTree
                     auto packageOffsetByteCount = (ch3 >> 2) & 7;
                     auto hasCompression = (ch3 >> 5) & 1;
 
-                    uint64_t decompressedSize = readVariadicInteger(compressedSizeByteCount);
+                    uint64_t decompressedSize = readVariadicInteger(memoryFile, compressedSizeByteCount);
 					//putvarchr decompressedSize 8 0
 					//getvarchr decompressedSize decompressedSize 0 long
                     decompressedSize &= 0x00000000FFFFFFFFull;
                     uint64_t compressedSize = 0;
                     if (hasCompression)
                     {
-                        compressedSize = readVariadicInteger(compressedSizeByteCount);
+                        compressedSize = readVariadicInteger(memoryFile, compressedSizeByteCount);
 						//putvarchr compressedSize 8 0
 						//getvarchr compressedSize compressedSize 0 long
                         compressedSize &= 0x00000000FFFFFFFFull;
                     }
 
                     uint64_t packageOffset = 0;
-                    if (packageOffsetByteCount)
                     {
-                        packageOffset = readVariadicInteger(packageOffsetByteCount);
+                        packageOffset = readVariadicInteger(memoryFile, packageOffsetByteCount);
 						//putvarchr packageOffset 8 0
 						//getvarchr packageOffset packageOffset 0 longlong
                         packageOffset &= 0x00FFFFFFFFFFFFFFull;
                     }
-                    uint64_t packageId = readVariadicInteger(2);
-
-                    std::vector<uint64_t> compSizeArray;
-                    if (hasCompression)
-                    {
-                        //uint64_t pageCount = (decompressedSize + 0xffff) >> 16;
-                        uint64_t pageCount = (decompressedSize + CHUNK_SIZE - 1) / CHUNK_SIZE;
-                        if (pageCount > 1)
-                        {
-                            for (uint64_t page = 0; page < pageCount; page++)
-                            {
-                                uint64_t compSize = readVariadicInteger(2);
-                                compSizeArray.push_back(compSize);
-                            }
-                        }
-                        else if (pageCount == 1)
-                        {
-                            compSizeArray.push_back(compressedSize);
-                        }
-                    }
-
-					//void Foo(const std::string& name, uint64_t packageId, uint64_t packageOffset, uint64_t decompressedSize, const std::vector<uint64_t>& compSizeArray, uint64_t ddsType, bool append, bool useDDS);
-                    cbFunction(name, packageId, packageOffset, decompressedSize, compSizeArray, ddsType, chunkIndex != 0, byteCount != 0 && chunkIndex == 0);
-                    uint64_t fileId = readVariadicInteger(4);
+					uint16_t packageId = memoryFile.Read<uint16_t>();
+					bool useDDS = (ch2 != 0 && chunkIndex == 0);
+                    DumpFile(memoryFile, name, packageId, packageOffset, hasCompression, decompressedSize, compressedSize, ddsType, chunkIndex != 0, useDDS);
+                    
+					uint32_t fileId = memoryFile.Read<uint32_t>();
                 }
             }
 
             if (ch & 8) //if (flag1)
             {
-                auto ch3 = data.Read<uint8_t>();
-                readVariadicInteger(ch3);
+                auto ch3 = memoryFile.Read<uint8_t>();
+                readVariadicInteger(memoryFile, ch3);
             }
         }
         else //search tree entry
         {
-            File data2 = data;
-            uint32_t offset = data.Read<uint32_t>();
-            data2.Seek(offset);
-            ParseNames(data, cbFunction, name);
-            ParseNames(data2, cbFunction, name);
+            uint32_t offset = memoryFile.Read<uint32_t>();
+            ParseNames(memoryFile, name);
+
+			memoryFile.Seek(offset);
+            ParseNames(memoryFile, name);
         }
     }
 };
@@ -157,39 +136,71 @@ struct FileTree
 std::wstring sdfTocFile;
 std::wstring outputDir;
 DataArray<SdfDdsHeader> ddsHeaderBlock;
+uint16_t lastPackageId = 0xFFFFFFFF;
+BlockPtr fileBlock = nullptr;
 
-void DumpFile(const std::string& name, uint32_t packageId, uint64_t packageOffset,
-	            uint64_t decompressedSize, const std::vector<uint64_t>& compSizeArray,
-	            uint64_t ddsType, bool append, bool useDDS)
+void DumpFile(File& memoryFile, const std::string& name,
+	uint16_t packageId, uint64_t packageOffset,
+	bool hasCompression, uint64_t decompressedSize, uint64_t compressedSize,
+	uint64_t ddsType, bool append, bool useDDS)
 {
-	boost::filesystem::path sdfTocPath(sdfTocFile);
-    std::wstring layer = L"A";
-    layer[0] += size_t(packageId / 1000);
-	typedef  boost::basic_format<wchar_t >  wformat;
-	std::wstring dataFormated = boost::str(boost::wformat(L"-%s-%04i.sdfdata") % layer % packageId);
-	std::wstring sdfDataPath = sdfTocPath.parent_path().append(sdfTocPath.stem().wstring()).wstring() + dataFormated;
-
-	if (!IsFileExist(sdfDataPath))
+	if (packageId != lastPackageId)
 	{
-        std::wcout << L"!!!Error: Can't open the file: " << sdfDataPath << std::endl;
-		return;
+		boost::filesystem::path sdfTocPath(sdfTocFile);
+		std::wstring layer = L"A";
+		layer[0] += size_t(packageId / 1000);
+		typedef  boost::basic_format<wchar_t >  wformat;
+		std::wstring dataFormated = boost::str(boost::wformat(L"-%s-%04i.sdfdata") % layer % packageId);
+		std::wstring sdfDataPath = sdfTocPath.parent_path().append(sdfTocPath.stem().wstring()).wstring() + dataFormated;
+		if (!IsFileExist(sdfDataPath))
+		{
+			std::wcout << L"!!!Error: Can't open the file: " << sdfDataPath << std::endl;
+			return;
+		}
+
+		fileBlock = MakeBlockDisk(sdfDataPath);
+		if (fileBlock->Size() <= 5)
+		{
+			// Skip 'Dummy' file
+			fileBlock = nullptr;
+			return;
+		}
+		std::wcout << L"Open file: " << sdfDataPath << std::endl;
+		lastPackageId = packageId;
 	}
 
-	BlockPtr fileBlock = MakeBlockDisk(sdfDataPath);
-	if (fileBlock->Size() <= 5)
+	std::vector<uint64_t> compSizeArray;
+	if (hasCompression)
 	{
-		// Skip 'Dummy' file
-		return;
+		//uint64_t pageCount = (decompressedSize + 0xffff) >> 16;
+		size_t pageCount = (decompressedSize + CHUNK_SIZE - 1) / CHUNK_SIZE;
+		if (pageCount > 1)
+		{
+			for (size_t page = 0; page < pageCount; page++)
+			{
+				uint16_t compSize = memoryFile.Read<uint16_t>();
+				compSizeArray.push_back(compSize);
+			}
+		}
+		else if (pageCount == 1)
+		{
+			compSizeArray.push_back(compressedSize);
+		}
 	}
-	std::wcout << L"Open file: " << sdfDataPath << std::endl;
 
 	std::wstring outFileName = outputDir + AnsiToUnicode(name);
 	std::replace(outFileName.begin(), outFileName.end(), L'/', L'\\');
+    if (IsFileExist(outFileName) && !append)
+    {
+		std::wcout << L"!!!Error: File is exist: " << outFileName << std::endl;
+		return;
+    }
 	CreateDirectoryRecursively(ExtractFilePath(outFileName));
 	std::wcout << L"Extract asset: " << outFileName << std::endl;
 
+
 	BlockPtr resultBlock;
-	if (compSizeArray.size() == 0)
+	if (!hasCompression)
 	{
 		// uncompressed data
 		try
@@ -198,10 +209,9 @@ void DumpFile(const std::string& name, uint32_t packageId, uint64_t packageOffse
 		}
 		catch (const std::exception& ex)
 		{
-			std::cout << "!!!Error: call MakeBlockPart. Exception: " << ex.what();
+			std::cout << "!!!Error: call MakeBlockPart. Exception: " << ex.what() << std::endl;
 			return;
 		}
-
 	}
 	else
 	{
@@ -280,7 +290,7 @@ void DumpFile(const std::string& name, uint32_t packageId, uint64_t packageOffse
 		}
 		catch (const std::exception& ex2)
 		{
-			std::cout << "!!!Error:" << ex2.what() << "!!!\n";
+			std::cout << "!!!Error: " << ex2.what() << "!!!\n";
 			return;
 		}
 	}
@@ -353,7 +363,7 @@ int wmain(int argc, wchar_t* argv[])
         size_t decompSize = ZSTD_decompress(decompressed.get(), header.decompressedSize, compressed.get(), header.compressedSize);
         File memoryFile = File(MakeBlockMemory(std::move(decompressed), decompSize));
         
-        FileTree::ParseNames(memoryFile, DumpFile);
+        FileTree::ParseNames(memoryFile);
     }
     catch (const std::exception & ex)
     {
