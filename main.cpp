@@ -112,8 +112,8 @@ struct FileTree
 					bool useDDS = (ch2 != 0 && chunkIndex == 0);
                     DumpFile(memoryFile, name, packageId, packageOffset, hasCompression, decompressedSize, compressedSize, ddsType, chunkIndex != 0, useDDS);
                     
-					uint32_t fileId = memoryFile.Read<uint32_t>();
                 }
+				uint32_t fileId = memoryFile.Read<uint32_t>();
             }
 
             if (ch & 8) //if (flag1)
@@ -136,7 +136,7 @@ struct FileTree
 std::wstring sdfTocFile;
 std::wstring outputDir;
 DataArray<SdfDdsHeader> ddsHeaderBlock;
-uint16_t lastPackageId = 0xFFFFFFFF;
+uint16_t lastPackageId = 0xFFFF;
 BlockPtr fileBlock = nullptr;
 
 void DumpFile(File& memoryFile, const std::string& name,
@@ -155,6 +155,8 @@ void DumpFile(File& memoryFile, const std::string& name,
 		if (!IsFileExist(sdfDataPath))
 		{
 			std::wcout << L"!!!Error: Can't open the file: " << sdfDataPath << std::endl;
+			uint16_t lastPackageId = 0xFFFF;
+			BlockPtr fileBlock = nullptr;
 			return;
 		}
 
@@ -168,6 +170,18 @@ void DumpFile(File& memoryFile, const std::string& name,
 		std::wcout << L"Open file: " << sdfDataPath << std::endl;
 		lastPackageId = packageId;
 	}
+
+	// Don't override exist file
+	std::wstring outFileName = outputDir + AnsiToUnicode(name);
+	std::replace(outFileName.begin(), outFileName.end(), L'/', L'\\');
+	if (IsFileExist(outFileName) && !append)
+	{
+		std::wcout << L"!!!Error: File is exist: " << outFileName << std::endl;
+		return;
+	}
+	CreateDirectoryRecursively(ExtractFilePath(outFileName));
+	std::wstring strExtract = append ?  L"+++++++ asset: " : L"Extract asset: ";
+	std::wcout << strExtract << outFileName << "\n";
 
 	std::vector<uint64_t> compSizeArray;
 	if (hasCompression)
@@ -187,17 +201,6 @@ void DumpFile(File& memoryFile, const std::string& name,
 			compSizeArray.push_back(compressedSize);
 		}
 	}
-
-	std::wstring outFileName = outputDir + AnsiToUnicode(name);
-	std::replace(outFileName.begin(), outFileName.end(), L'/', L'\\');
-    if (IsFileExist(outFileName) && !append)
-    {
-		std::wcout << L"!!!Error: File is exist: " << outFileName << std::endl;
-		return;
-    }
-	CreateDirectoryRecursively(ExtractFilePath(outFileName));
-	std::wcout << L"Extract asset: " << outFileName << std::endl;
-
 
 	BlockPtr resultBlock;
 	if (!hasCompression)
